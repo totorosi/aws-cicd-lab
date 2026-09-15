@@ -1,0 +1,154 @@
+# FastAPI 스택이 "컨테이너가 죽어도 데이터가 남는다"는 약속을 지키는지 검사한다.
+#
+# 문서로 주장하는 대신 매번 실제로 죽여보고 확인한다.
+#
+#   1. 스택을 띄우고 데이터를 만든다
+#   2. docker compose down 으로 컨테이너를 완전히 삭제한다
+#   3. 다시 띄워서 데이터가 그대로인지 본다
+#   4. DB 만 재시작한 뒤에도 API 가 요청을 처리하는지 본다
+#
+# AWS 자격증명이 필요 없어 시크릿 없이도 그대로 돈다.
+
+name: FastAPI persistence test
+
+on:
+  pull_request:
+    paths:
+      - "fastapi/**"
+      - ".github/workflows/fastapi.yml"
+  push:
+    branches: [main]
+    paths:
+      - "fastapi/**"
+      - ".github/workflows/fastapi.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: fastapi-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  API: http://localhost:8000
+
+jobs:
+  persistence:
+    name: 컨테이너를 죽여도 데이터가 남는가
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fastapi
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # 비밀번호는 이 실행에서만 쓰고 버린다.
+      - name: Prepare .env
+        run: |
+          sed "s/change-me/$(openssl rand -hex 16)/" .env.example > .env
+
+      # --wait 는 헬스체크가 통과할 때까지 기다린다.
+      # 이게 없으면 DB 가 준비되기 전에 다음 스텝이 실행된다.
+      - name: Start the stack
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Health check
+        run: |
+          curl -fsS "${API}/health" | tee /dev/stderr | grep -q '"status":"ok"'
+
+      # ----------------------------------------------------------------------
+      # 지워지면 안 되는 것들을 만든다
+      # ----------------------------------------------------------------------
+      - name: Create data
+        run: |
+          set -euo pipefail
+
+          for name in alpha beta gamma; do
+            curl -fsS -X POST "${API}/items" \
+              -H 'Content-Type: application/json' \
+              -d "{\"name\":\"${name}\"}" > /dev/null
+          done
+
+          echo "이 파일은 컨테이너가 사라져도 남아야 한다" > note.txt
+          curl -fsS -X POST "${API}/files" -F "file=@note.txt" > /dev/null
+
+          curl -fsS "${API}/items" > /tmp/items-before.json
+          curl -fsS "${API}/files" > /tmp/files-before.json
+
+          echo "생성된 항목:"
+          jq -c '.' /tmp/items-before.json
+          jq -e 'length == 3' /tmp/items-before.json > /dev/null
+          jq -e '. == ["note.txt"]' /tmp/files-before.json > /dev/null
+
+      # ----------------------------------------------------------------------
+      # 컨테이너를 완전히 삭제한다. -v 를 붙이지 않으므로 볼륨은 남는다.
+      # ----------------------------------------------------------------------
+      - name: Destroy the containers
+        run: |
+          set -euo pipefail
+          docker compose down
+
+          remaining=$(docker ps -aq --filter "name=fastapi-" | wc -l)
+          echo "남은 컨테이너 수: ${remaining}"
+          if [ "${remaining}" -ne 0 ]; then
+            echo "컨테이너가 삭제되지 않았습니다. 이 테스트는 의미가 없습니다."
+            exit 1
+          fi
+
+          echo "남은 볼륨:"
+          docker volume ls --filter name=fastapi-stack --format '{{.Name}}'
+
+      - name: Recreate and verify the data survived
+        run: |
+          set -euo pipefail
+          docker compose up -d --wait --wait-timeout 180
+
+          curl -fsS "${API}/items" > /tmp/items-after.json
+          curl -fsS "${API}/files" > /tmp/files-after.json
+
+          # 생성 시각까지 같아야 한다. 값만 같고 시각이 다르면
+          # 보존된 게 아니라 새로 만들어진 것이다.
+          if ! diff <(jq -S '.' /tmp/items-before.json) <(jq -S '.' /tmp/items-after.json); then
+            echo "데이터가 보존되지 않았습니다."
+            exit 1
+          fi
+
+          diff <(jq -S '.' /tmp/files-before.json) <(jq -S '.' /tmp/files-after.json)
+          echo "컨테이너 삭제 후에도 항목 3건과 업로드 파일이 그대로입니다."
+
+      # ----------------------------------------------------------------------
+      # DB 만 재시작한다. pool_pre_ping 이 없으면 첫 요청이 실패한다.
+      # ----------------------------------------------------------------------
+      - name: Restart only the database
+        run: |
+          set -euo pipefail
+
+          api_started_before=$(docker inspect fastapi-api --format '{{.State.StartedAt}}')
+          docker compose restart db
+          docker compose up -d --wait --wait-timeout 120
+
+          api_started_after=$(docker inspect fastapi-api --format '{{.State.StartedAt}}')
+          if [ "${api_started_before}" != "${api_started_after}" ]; then
+            echo "API 컨테이너가 재시작되었습니다. 끊긴 커넥션 처리를 검증할 수 없습니다."
+            exit 1
+          fi
+
+          # API 를 재시작하지 않은 채로 조회와 생성이 모두 되어야 한다.
+          curl -fsS "${API}/items" | jq -e 'length == 3' > /dev/null
+          curl -fsS -X POST "${API}/items" \
+            -H 'Content-Type: application/json' \
+            -d '{"name":"after-db-restart"}' > /dev/null
+          curl -fsS "${API}/items" | jq -e 'length == 4' > /dev/null
+
+          echo "DB 재시작 후에도 API 재시작 없이 조회와 생성이 동작합니다."
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs --tail 80
+
+      # -v 를 붙여 볼륨까지 지운다. 러너는 어차피 버려지지만 의도를 분명히 한다.
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
