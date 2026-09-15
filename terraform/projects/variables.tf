@@ -77,3 +77,29 @@ variable "ssh_allowed_cidrs" {
   type        = list(string)
   default     = []
 }
+
+# -------------------------------------------
+# EKS
+variable "create_eks" {
+  description = "EKS 클러스터를 생성할지 여부. 컨트롤 플레인과 노드 비용이 계속 발생하므로 실습할 때만 true 로 켠다."
+  type        = bool
+  default     = false
+}
+
+variable "eks_kubernetes_version" {
+  description = "EKS 쿠버네티스 버전. 비워두면 AWS 기본 버전이 선택된다."
+  type        = string
+  default     = null
+}
+
+variable "eks_node_instance_types" {
+  description = "EKS 노드 인스턴스 타입"
+  type        = list(string)
+  default     = ["t3.medium"]
+}
+
+variable "eks_node_desired_size" {
+  description = "EKS 노드 희망 개수"
+  type        = number
+  default     = 2
+}

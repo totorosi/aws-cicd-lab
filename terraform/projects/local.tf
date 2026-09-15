@@ -62,6 +62,11 @@ locals {
   vpc_id      = module.mumbai_network.network.vpc.id
   subnets     = module.mumbai_network.network.subnets
   mysql_sg_id = module.mumbai_network.mysql_sg
+
+  # EKS 는 cluster 서브넷(프라이빗)에 올린다. 서브넷 키가 "cluster1a" 형식이라
+  # 접두사로 고른다. 이 서브넷에는 이미 kubernetes.io/role/internal-elb 태그가 붙어 있다.
+  cluster_subnet_ids = [for k, s in local.subnets : s.id if startswith(k, "cluster")]
+  eks_node_sg_id     = module.mumbai_network.eks_node_sg
 }
 
 output "route_map" {

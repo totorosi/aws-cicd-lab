@@ -27,6 +27,7 @@ fastapi/                   FastAPI + Postgres (영속성 데모)
 terraform/
   modules/network          VPC · 서브넷 · NAT · 보안그룹 · EC2 · IAM
   modules/database         RDS (기본 비활성화)
+  modules/eks              EKS 클러스터 · 노드 그룹 · 애드온 (기본 비활성화)
   projects/                실제 구성 진입점
 .github/workflows/         위 표의 워크플로 5개
 ```

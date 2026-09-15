@@ -14,3 +14,8 @@ output "ec2_instance_id" {
 output "mysql_sg" {
   value = aws_security_group.mysql_sg.id
 }
+
+output "eks_node_sg" {
+  description = "EKS 노드에 붙일 보안 그룹"
+  value       = aws_security_group.eks_node_sg.id
+}

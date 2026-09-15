@@ -18,6 +18,26 @@ module "mumbai_network" {
   create_ec2_instance    = var.create_ec2_instance
 }
 
+# ################################################################################
+# EKS
+# ================================================================================
+# 네트워크 모듈이 만든 cluster 서브넷과 eks_node_sg 위에 올린다.
+#
+# 기본값은 false 다. 컨트롤 플레인만으로도 시간당 요금이 발생하고 노드 비용이 따로 붙는다.
+# 실습할 때만 terraform.tfvars 에서 켜고, 끝나면 다시 false 로 내리고 apply 한다.
+module "eks" {
+  count  = var.create_eks ? 1 : 0
+  source = "../modules/eks"
+
+  tag_header             = local.tag_header
+  subnet_ids             = local.cluster_subnet_ids
+  node_security_group_id = local.eks_node_sg_id
+
+  kubernetes_version  = var.eks_kubernetes_version
+  node_instance_types = var.eks_node_instance_types
+  node_desired_size   = var.eks_node_desired_size
+}
+
 # RDS 는 현재 어느 리소스도 참조하지 않아 비활성화한다.
 # Aurora 클러스터 생성과 시크릿 로테이션용 CloudFormation 스택 때문에
 # apply 시간이 10분 이상 늘어나고, db.m8gd.large 비용도 계속 발생한다.

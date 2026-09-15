@@ -20,3 +20,15 @@ create_ec2_instance = true
 # 도커 이미지 tar 을 주고받는 버킷.
 # GitHub Actions 의 S3_BUCKET_NAME 시크릿과 같은 값을 넣는다.
 deploy_artifact_bucket = "my-deploy-artifacts-bucket"
+
+# EKS 클러스터 생성 여부. 켜는 순간 컨트롤 플레인(시간당 과금)과 노드 비용이 발생한다.
+# 실습이 끝나면 false 로 내리고 apply 해서 지운다.
+create_eks = false
+
+# 비워두면 AWS 기본 버전이 선택된다. 현재 클러스터는 이 방식으로 1.36 이 잡혔다.
+# 버전을 고정하려면 주석을 푼다. 단 EKS 는 버전을 내릴 수 없으므로
+# 이미 떠 있는 클러스터보다 낮은 값을 넣으면 apply 가 실패한다.
+# eks_kubernetes_version = "1.36"
+
+eks_node_instance_types = ["t3.medium"]
+eks_node_desired_size   = 2
