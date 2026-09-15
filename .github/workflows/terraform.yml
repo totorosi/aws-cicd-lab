@@ -32,7 +32,11 @@ env:
 
   # SSH 허용 대역은 저장소에 두지 않고 Secret 으로 주입한다.
   # 예) ["203.0.113.10/32"]  (JSON 배열 형식이어야 한다)
-  TF_VAR_ssh_allowed_cidrs: ${{ secrets['TF_VAR_SSH_ALLOWED_CIDRS'] }}
+  #
+  # 시크릿이 없으면 빈 문자열이 들어가는데, terraform 이 그걸 리스트 표현식으로
+  # 파싱하려다 "Missing expression" 으로 죽는다. 그래서 빈 리스트를 기본값으로 둔다.
+  # 빈 리스트면 아무도 SSH 로 접속할 수 없다(SSM Session Manager 는 그대로 사용 가능).
+  TF_VAR_ssh_allowed_cidrs: ${{ secrets['TF_VAR_SSH_ALLOWED_CIDRS'] || '[]' }}
 
   WORKING_DIR: terraform/projects
   AWS_REGION: sa-east-1
