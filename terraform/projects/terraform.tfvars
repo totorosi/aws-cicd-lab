@@ -14,6 +14,9 @@ domain_name = "example.com"
 
 subnet_type = ["public", "private", "cluster"]
 
+# 웹 인스턴스 생성 여부. 배포 실습을 할 때만 true 로 켠다.
+create_ec2_instance = true
+
 # 도커 이미지 tar 을 주고받는 버킷.
 # GitHub Actions 의 S3_BUCKET_NAME 시크릿과 같은 값을 넣는다.
 deploy_artifact_bucket = "my-deploy-artifacts-bucket"

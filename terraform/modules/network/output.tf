@@ -8,7 +8,7 @@ output "network" {
 
 output "ec2_instance_id" {
   description = "GitHub Actions 워크플로의 SSM_INSTANCE_ID 에 넣을 값"
-  value       = aws_instance.ec2_instance.id
+  value       = one(aws_instance.ec2_instance[*].id)
 }
 
 output "mysql_sg" {

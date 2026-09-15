@@ -15,6 +15,7 @@ module "mumbai_network" {
   region             = local.region
 
   deploy_artifact_bucket = var.deploy_artifact_bucket
+  create_ec2_instance    = var.create_ec2_instance
 }
 
 # RDS 는 현재 어느 리소스도 참조하지 않아 비활성화한다.

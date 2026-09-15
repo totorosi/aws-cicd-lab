@@ -73,6 +73,12 @@ variable "ami_id" {
   default     = ""
 }
 
+variable "create_ec2_instance" {
+  description = "웹 인스턴스를 생성할지 여부. false 면 만들지 않는다."
+  type        = bool
+  default     = true
+}
+
 variable "deploy_artifact_bucket" {
   description = "배포 아티팩트(도커 이미지 tar)가 올라가는 S3 버킷 이름"
   type        = string

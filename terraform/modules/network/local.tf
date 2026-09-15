@@ -8,6 +8,7 @@ locals {
   subnet_type            = var.subnet_type
   ami_id                 = var.ami_id
   deploy_artifact_bucket = var.deploy_artifact_bucket
+  create_ec2_instance    = var.create_ec2_instance
   inbound_ports = [
     { from = 80, to = 80 },
     { from = 443, to = 443 },

@@ -1,4 +1,6 @@
 resource "aws_instance" "ec2_instance" {
+  # false 로 두면 만들지 않는다. NAT 인스턴스와 같은 방식.
+  count         = local.create_ec2_instance ? 1 : 0
   ami           = local.ami_id
   instance_type = "t3.micro"
 

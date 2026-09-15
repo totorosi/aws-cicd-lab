@@ -60,6 +60,12 @@ variable "domain_name" {
   default     = ""
 }
 
+variable "create_ec2_instance" {
+  description = "웹 인스턴스를 생성할지 여부. 배포 실습을 할 때만 true 로 켠다."
+  type        = bool
+  default     = false
+}
+
 variable "deploy_artifact_bucket" {
   description = "배포 아티팩트(도커 이미지 tar)가 올라가는 S3 버킷 이름"
   type        = string
