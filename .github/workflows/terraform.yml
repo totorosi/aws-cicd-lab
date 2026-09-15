@@ -1,8 +1,11 @@
 # 테라폼 설정을 검사하고 인프라에 반영한다.
 #
-#   PR            → fmt / validate / plan 후 plan 결과를 PR 에 코멘트
-#   main 에 push  → 위 검사를 통과하면 apply
-#   수동 실행     → plan 까지만 (dry-run)
+#   check  자격증명 없이 도는 검사(fmt · validate). 항상 실행된다.
+#   plan   AWS 자격증명과 state 버킷이 필요하다. PR 에 결과를 코멘트한다.
+#   apply  main 에 push 됐을 때만.
+#
+# plan 과 apply 는 저장소 변수 DEPLOY_ENABLED 가 'true' 일 때만 돈다.
+# 시크릿을 설정하지 않은 저장소에서 자격증명 단계가 실패하는 것을 막기 위해서다.
 
 name: Terraform
 
@@ -26,9 +29,11 @@ on:
 # ----------------------------------------------------------------------------
 env:
   TF_VERSION: "1.16.2"
-  # SSH 허용 대역은 저장소에 두지 않고 Secret 으로 주입합니다.
-  # 예) ["203.0.113.10/32"]  (JSON 배열 형식이어야 합니다)
+
+  # SSH 허용 대역은 저장소에 두지 않고 Secret 으로 주입한다.
+  # 예) ["203.0.113.10/32"]  (JSON 배열 형식이어야 한다)
   TF_VAR_ssh_allowed_cidrs: ${{ secrets['TF_VAR_SSH_ALLOWED_CIDRS'] }}
+
   WORKING_DIR: terraform/projects
   AWS_REGION: sa-east-1
 
@@ -43,10 +48,40 @@ permissions:
 
 jobs:
   # --------------------------------------------------------------------------
-  # 1) 검사 단계. PR 에서는 여기까지만 돈다.
+  # 1) 자격증명이 필요 없는 검사. 어떤 저장소에서도 그대로 돈다.
   # --------------------------------------------------------------------------
-  terraform:
-    name: fmt / validate / plan
+  check:
+    name: fmt / validate
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive -diff ..
+
+      # -backend=false 로 초기화하면 state 버킷에 접근하지 않는다.
+      # 문법과 참조 검사에는 backend 가 필요 없다.
+      - name: Terraform init (backend 없이)
+        run: terraform init -backend=false -input=false
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+  # --------------------------------------------------------------------------
+  # 2) 실제 인프라를 읽어 변경 계획을 만든다. 자격증명과 state 버킷이 필요하다.
+  # --------------------------------------------------------------------------
+  plan:
+    name: plan
+    needs: check
+    if: vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -66,18 +101,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Terraform fmt
-        id: fmt
-        run: terraform fmt -check -recursive -diff ..
-        continue-on-error: true
-
       # backend 가 부분 설정이라 버킷/리전을 여기서 주입한다.
       - name: Terraform init
         run: |
-          terraform init -input=false             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"             -backend-config="region=${{ env.AWS_REGION }}"
-
-      - name: Terraform validate
-        run: terraform validate -no-color
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
 
       - name: Terraform plan
         id: plan
@@ -92,8 +121,7 @@ jobs:
         with:
           script: |
             const plan = (process.env.PLAN || '').slice(0, 60000)
-            const body = `#### Terraform fmt \`${{ steps.fmt.outcome }}\`
-            #### Terraform plan \`${{ steps.plan.outcome }}\`
+            const body = `#### Terraform plan \`${{ steps.plan.outcome }}\`
 
             <details><summary>plan 결과 펼치기</summary>
 
@@ -121,16 +149,11 @@ jobs:
           retention-days: 5
 
   # --------------------------------------------------------------------------
-  # 2) main 에 push 됐을 때만 실제 인프라에 반영한다.
+  # 3) main 에 push 됐을 때만 실제 인프라에 반영한다.
   # --------------------------------------------------------------------------
   apply:
     name: apply
-    needs: terraform
-    # main 브랜치에 push 됐을 때만 적용.
-    # 수동 실행(workflow_dispatch)은 plan 까지만 돌려 dry-run 으로 쓴다.
-    # 배포는 저장소 변수 DEPLOY_ENABLED 가 'true' 일 때만 돈다.
-    # 값이 없으면 이 job 은 실패가 아니라 '건너뜀'으로 처리된다.
-    # (secrets 는 job 레벨 if 에서 쓸 수 없어 vars 로 게이트한다)
+    needs: plan
     if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     defaults:
@@ -151,10 +174,11 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # backend 가 부분 설정이라 버킷/리전을 여기서 주입한다.
       - name: Terraform init
         run: |
-          terraform init -input=false             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"             -backend-config="region=${{ env.AWS_REGION }}"
+          terraform init -input=false \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
 
       - name: Terraform apply
         run: terraform apply -input=false -auto-approve -no-color
