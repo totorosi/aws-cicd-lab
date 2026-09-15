@@ -116,11 +116,11 @@ jobs:
   deploy:
     name: Deploy to Auto Scaling Group with SSM
     needs: build-and-preview
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # 배포는 저장소 변수 DEPLOY_ENABLED 가 'true' 일 때만 돈다.
+    # 값이 없으면 이 job 은 실패가 아니라 '건너뜀'으로 처리된다.
+    # (secrets 는 job 레벨 if 에서 쓸 수 없어 vars 로 게이트한다)
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
-
-    env:
-      IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
 
     steps:
       - name: Download Docker image artifact
@@ -142,6 +142,9 @@ jobs:
 
       - name: Tag and push Docker image to ECR
         run: |
+          # job 레벨 env 에서는 env 컨텍스트를 못 쓰므로 셸에서 조립한다.
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
           docker load --input site-image.tar
           docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_URI}"
           docker push "${IMAGE_URI}"
@@ -149,6 +152,8 @@ jobs:
       - name: Deploy container through SSM
         run: |
           set -euo pipefail
+
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 
           # 인스턴스에서 실행할 스크립트.
           # 한 줄짜리 JSON 으로 욱여넣지 않고 그대로 읽히도록 파일로 만든다.

@@ -115,7 +115,10 @@ jobs:
   deploy:
     name: Deploy with SSM
     needs: build-and-preview
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # 배포는 저장소 변수 DEPLOY_ENABLED 가 'true' 일 때만 돈다.
+    # 값이 없으면 이 job 은 실패가 아니라 '건너뜀'으로 처리된다.
+    # (secrets 는 job 레벨 if 에서 쓸 수 없어 vars 로 게이트한다)
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
 
     env:
