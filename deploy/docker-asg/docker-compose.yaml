@@ -1,0 +1,50 @@
+# ASG 인스턴스에서 ECR 이미지를 받아 정적 사이트 컨테이너를 띄운다.
+#
+# 이미지 주소와 사이트 경로는 환경변수로 주입한다. 실행 예:
+#   ECR_REGISTRY=<ACCOUNT_ID>.dkr.ecr.sa-east-1.amazonaws.com \
+#   ECR_REPOSITORY=nginx \
+#   IMAGE_TAG=latest \
+#   docker compose up -d
+#
+# SITE_ROOT 아래 html/ 과 logs/ 가 있어야 한다. html/ 은 배포할 때
+# 이미지에서 꺼내 채운다 (아래 "볼륨" 주석 참고).
+#
+# Compose v2 부터 최상단 version 키는 사용하지 않는다(지정하면 경고만 출력됨).
+
+services:
+  my-service-web:
+    image: ${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}
+    container_name: static-site
+    restart: always
+
+    ports:
+      - "80:80"
+
+    # 볼륨
+    #
+    # 주의: 바인드 마운트는 이미지 내용을 호스트로 복사해주지 않는다.
+    # 호스트 디렉토리가 비어 있으면 컨테이너 웹루트도 비어서 nginx 가 403 을 낸다.
+    # 그래서 배포할 때 이미지에서 파일을 먼저 꺼내 호스트에 채워야 한다:
+    #
+    #   docker run --rm -v ${SITE_ROOT}/html:/out <이미지> \
+    #     sh -c 'rm -rf /out/* && cp -a /usr/share/nginx/html/. /out/'
+    #
+    # html 은 읽기 전용(:ro)으로 물려 컨테이너가 사이트를 수정하지 못하게 한다.
+    volumes:
+      - ${SITE_ROOT:-/home/ec2-user/nginx}/html:/usr/share/nginx/html:ro
+      - ${SITE_ROOT:-/home/ec2-user/nginx}/logs:/var/log/nginx
+
+    # 네트워크
+    #
+    # 기본 네트워크를 쓰지 않고 이름을 붙여 격리한다.
+    # alias 를 주면 나중에 서비스를 추가했을 때 그 컨테이너가
+    # http://nginx 로 이 컨테이너를 찾을 수 있다.
+    networks:
+      site-net:
+        aliases:
+          - nginx
+
+networks:
+  site-net:
+    name: ${COMPOSE_PROJECT_NAME:-site}-net
+    driver: bridge

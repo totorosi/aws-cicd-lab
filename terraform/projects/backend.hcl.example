@@ -1,0 +1,8 @@
+# terraform state 를 둘 S3 버킷.
+#
+#   cp backend.hcl.example backend.hcl
+#   terraform init -backend-config=backend.hcl
+#
+# backend.hcl 은 .gitignore 에 있어 저장소에 올라가지 않는다.
+bucket = "my-terraform-state-bucket"
+region = "sa-east-1"

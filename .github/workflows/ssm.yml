@@ -1,0 +1,181 @@
+# 정적 파일을 EC2 호스트의 nginx 웹루트로 직접 복사해서 배포한다.
+#
+#   [러너] html/ 를 artifact 로 업로드
+#        → S3 임시 경로 sync
+#        → SSM RunShellScript
+#   [EC2] aws s3 sync → 웹루트 비우고 복사
+#
+# 컨테이너를 쓰지 않고 호스트에 설치된 nginx 가 직접 파일을 서빙한다.
+
+name: Deploy Static Website with SSM
+
+# ----------------------------------------------------------------------------
+# 트리거
+# ----------------------------------------------------------------------------
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/ssm.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/ssm.yml"
+  workflow_dispatch:
+
+# ----------------------------------------------------------------------------
+# 공통 설정
+# ----------------------------------------------------------------------------
+env:
+  AWS_REGION: sa-east-1
+
+  # 정적 파일을 잠시 올려두는 버킷. 배포가 끝나면 해당 prefix 를 지운다.
+  S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+
+  # 배포 대상 EC2. 인스턴스를 다시 만들면 시크릿 값을 갱신한다.
+  SSM_INSTANCE_ID: ${{ secrets.SSM_INSTANCE_ID }}
+
+  # EC2 의 nginx 웹루트
+  WEB_ROOT: /usr/share/nginx/html
+
+  # 리포지토리 안에서 배포할 디렉터리
+  BUILD_DIR: site
+
+# 동시에 여러 배포가 실행되어 서버 파일이 꼬이는 것을 방지
+concurrency:
+  group: ssm-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1) 정적 파일을 artifact 로 넘긴다. PR 에서는 여기까지만 돈다.
+  # --------------------------------------------------------------------------
+  build-and-preview:
+    name: Package & Preview
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const body = `#### SSM Deployment Preview \`Success\`
+
+            PR 변경 사항에 대한 정적 파일 빌드가 성공적으로 완료되었습니다.
+            \`main\` 브랜치 머지 시 SSM을 통해 EC2에 자동 배포됩니다.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: site-build
+          path: ${{ env.BUILD_DIR }}
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # 2) main 에 push 됐을 때만 실제 배포한다.
+  # --------------------------------------------------------------------------
+  deploy:
+    name: Deploy with SSM
+    needs: build-and-preview
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    env:
+      S3_PREFIX: ssm-deploy/${{ github.sha }}
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: site-build
+          path: ${{ env.BUILD_DIR }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Upload package to temporary S3 prefix
+        run: |
+          aws s3 sync "${BUILD_DIR}" "s3://${S3_BUCKET_NAME}/${S3_PREFIX}/" --delete
+
+      - name: Deploy files through SSM
+        env:
+          DEPLOY_PREFIX: s3://${{ env.S3_BUCKET_NAME }}/${{ env.S3_PREFIX }}/
+        run: |
+          set -euo pipefail
+
+          # 인스턴스에서 실행할 스크립트.
+          # 한 줄짜리 JSON 으로 욱여넣지 않고 그대로 읽히도록 파일로 만든다.
+          # 러너의 셸이 ${...} 를 먼저 치환한 뒤 EC2 로 전달된다.
+          cat > remote-deploy.sh <<EOF
+          set -e
+          rm -rf /tmp/site-deploy && mkdir -p /tmp/site-deploy
+          aws s3 sync ${DEPLOY_PREFIX} /tmp/site-deploy/
+          mkdir -p '${WEB_ROOT}'
+          find '${WEB_ROOT}' -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          cp -R /tmp/site-deploy/. '${WEB_ROOT}'/
+          rm -rf /tmp/site-deploy
+          EOF
+
+          echo "----- EC2 에서 실행될 스크립트 -----"
+          cat remote-deploy.sh
+          echo "-----------------------------------"
+
+          # jq -Rs 로 스크립트 전체를 JSON 문자열 하나로 감싼다.
+          command_id=$(aws ssm send-command \
+            --instance-ids "${SSM_INSTANCE_ID}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy ${GITHUB_REPOSITORY}@${GITHUB_SHA}" \
+            --parameters "$(jq -Rs '{commands: [.]}' < remote-deploy.sh)" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: ${command_id}"
+
+          # send-command 직후에는 invocation 이 아직 등록되지 않아
+          # wait 가 InvocationDoesNotExist 로 즉시 실패할 수 있다.
+          sleep 5
+
+          wait_status=0
+          aws ssm wait command-executed \
+            --command-id "${command_id}" \
+            --instance-id "${SSM_INSTANCE_ID}" || wait_status=$?
+
+          # 성공/실패와 무관하게 인스턴스 쪽 출력을 로그에 남긴다.
+          invocation=$(aws ssm get-command-invocation \
+            --command-id "${command_id}" \
+            --instance-id "${SSM_INSTANCE_ID}" \
+            --output json)
+
+          echo "Status: $(jq -r '.Status' <<<"${invocation}")"
+          echo "----- stdout -----"
+          jq -r '.StandardOutputContent' <<<"${invocation}"
+          echo "----- stderr -----"
+          jq -r '.StandardErrorContent' <<<"${invocation}"
+
+          exit "${wait_status}"
+
+      # 배포 성공 여부와 관계없이 임시 파일을 지운다.
+      - name: Remove temporary package
+        if: always()
+        run: |
+          aws s3 rm "s3://${S3_BUCKET_NAME}/${S3_PREFIX}/" --recursive

@@ -1,0 +1,92 @@
+# FastAPI + Postgres.
+#
+# 핵심 원칙: 컨테이너는 언제든 죽고 다시 만들어질 수 있는 일회용품으로 다룬다.
+# 남아야 하는 것은 전부 named volume 에 둔다.
+#
+#   pgdata   → DB 데이터        (컨테이너를 지워도 남음)
+#   uploads  → 업로드된 파일    (컨테이너를 지워도 남음)
+#
+# 컨테이너 파일시스템에 쓴 것은 컨테이너와 함께 사라진다.
+#
+# 실행:
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+# 주의: docker compose down -v 는 볼륨까지 지운다. 데이터를 남기려면 -v 를 빼야 한다.
+
+name: fastapi-stack
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fastapi-db
+
+    # 죽으면 항상 다시 띄운다. 다만 사용자가 직접 멈춘 경우는 존중한다.
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      # 데이터 디렉토리를 하위 폴더로 지정한다. 볼륨 루트에 바로 쓰면
+      # 일부 환경에서 lost+found 같은 항목 때문에 초기화가 거부된다.
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    # API 가 "DB 가 준비된 뒤" 뜨게 하려면 헬스체크가 반드시 있어야 한다.
+    # depends_on 만으로는 컨테이너가 떴는지만 보고 DB 가 받을 준비가 됐는지는 모른다.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+    networks:
+      - backend
+
+  api:
+    build: .
+    image: fastapi-app:local
+    container_name: fastapi-api
+    restart: unless-stopped
+
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      UPLOAD_DIR: /data/uploads
+
+    volumes:
+      - uploads:/data/uploads
+
+    depends_on:
+      db:
+        condition: service_healthy
+
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+    # 슬림 이미지에 curl 이 없으므로 파이썬으로 확인한다.
+    # /health 는 DB 까지 확인하므로, DB 가 죽으면 이 컨테이너도 unhealthy 로 잡힌다.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=3).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:
+
+networks:
+  backend:
+    driver: bridge

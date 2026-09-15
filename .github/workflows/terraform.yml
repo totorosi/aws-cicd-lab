@@ -1,0 +1,157 @@
+# 테라폼 설정을 검사하고 인프라에 반영한다.
+#
+#   PR            → fmt / validate / plan 후 plan 결과를 PR 에 코멘트
+#   main 에 push  → 위 검사를 통과하면 apply
+#   수동 실행     → plan 까지만 (dry-run)
+
+name: Terraform
+
+# ----------------------------------------------------------------------------
+# 트리거
+# ----------------------------------------------------------------------------
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+
+# ----------------------------------------------------------------------------
+# 공통 설정
+# ----------------------------------------------------------------------------
+env:
+  TF_VERSION: "1.16.2"
+  # SSH 허용 대역은 저장소에 두지 않고 Secret 으로 주입합니다.
+  # 예) ["203.0.113.10/32"]  (JSON 배열 형식이어야 합니다)
+  TF_VAR_ssh_allowed_cidrs: ${{ secrets['TF_VAR_SSH_ALLOWED_CIDRS'] }}
+  WORKING_DIR: terraform/projects
+  AWS_REGION: sa-east-1
+
+# 동시에 두 개의 apply 가 돌면 state 락이 충돌하므로 직렬화
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1) 검사 단계. PR 에서는 여기까지만 돈다.
+  # --------------------------------------------------------------------------
+  terraform:
+    name: fmt / validate / plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform fmt
+        id: fmt
+        run: terraform fmt -check -recursive -diff ..
+        continue-on-error: true
+
+      # backend 가 부분 설정이라 버킷/리전을 여기서 주입한다.
+      - name: Terraform init
+        run: |
+          terraform init -input=false             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"             -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform validate
+        run: terraform validate -no-color
+
+      - name: Terraform plan
+        id: plan
+        run: terraform plan -input=false -no-color -out=tfplan
+        continue-on-error: true
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        env:
+          PLAN: ${{ steps.plan.outputs.stdout }}
+        with:
+          script: |
+            const plan = (process.env.PLAN || '').slice(0, 60000)
+            const body = `#### Terraform fmt \`${{ steps.fmt.outcome }}\`
+            #### Terraform plan \`${{ steps.plan.outcome }}\`
+
+            <details><summary>plan 결과 펼치기</summary>
+
+            \`\`\`terraform
+            ${plan}
+            \`\`\`
+
+            </details>`
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            })
+
+      - name: Fail if plan errored
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tfplan
+          path: ${{ env.WORKING_DIR }}/tfplan
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # 2) main 에 push 됐을 때만 실제 인프라에 반영한다.
+  # --------------------------------------------------------------------------
+  apply:
+    name: apply
+    needs: terraform
+    # main 브랜치에 push 됐을 때만 적용.
+    # 수동 실행(workflow_dispatch)은 plan 까지만 돌려 dry-run 으로 쓴다.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # backend 가 부분 설정이라 버킷/리전을 여기서 주입한다.
+      - name: Terraform init
+        run: |
+          terraform init -input=false             -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}"             -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve -no-color

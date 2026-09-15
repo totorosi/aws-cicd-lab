@@ -1,0 +1,215 @@
+# 정적 사이트를 도커 이미지로 빌드해 ECR 에 올리고, ASG 안의 모든 인스턴스에 배포한다.
+#
+#   [러너] docker build → docker save → tar
+#        → ECR push
+#        → SSM RunShellScript (ASG 이름으로 타겟팅)
+#   [EC2] docker pull → docker run
+#
+# 인스턴스가 계속 뜨고 내려가므로 고정 인스턴스 ID 대신 ASG 태그로 대상을 지정한다.
+
+name: Deploy Static Website with Docker ASG
+
+# ----------------------------------------------------------------------------
+# 트리거
+# ----------------------------------------------------------------------------
+on:
+  pull_request:
+    paths:
+      - "site/**"
+      - "deploy/**"
+      - ".github/workflows/docker-asg.yml"
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "deploy/**"
+      - ".github/workflows/docker-asg.yml"
+  workflow_dispatch:
+
+# ----------------------------------------------------------------------------
+# 공통 설정
+# ----------------------------------------------------------------------------
+env:
+  AWS_REGION: sa-east-1
+
+  # 배포 대상: ASG 이름이 붙은 인스턴스 전부.
+  # ASG 는 인스턴스가 수시로 교체되므로 인스턴스 ID 로는 지정할 수 없다.
+  SSM_TARGET_KEY: tag:aws:autoscaling:groupName
+  SSM_TARGET_VALUE: ${{ secrets.ASG_NAME }}
+
+  # 이미지 저장소. 계정 ID 는 저장소에 두지 않고 시크릿으로 받는다.
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com
+  ECR_REPOSITORY: nginx
+  IMAGE_TAG: latest
+
+  # 컨테이너 이름과 호스트에서 점유할 포트
+  CONTAINER_NAME: static-site
+  HOST_PORT: "80"
+
+# 동시에 여러 배포가 실행되어 컨테이너가 꼬이는 것을 방지
+concurrency:
+  group: docker-asg-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1) 이미지를 빌드해서 artifact 로 넘긴다. PR 에서는 여기까지만 돈다.
+  # --------------------------------------------------------------------------
+  build-and-preview:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 베이스 이미지의 익명 pull 횟수 제한을 피하기 위한 로그인.
+      # 시크릿을 등록하지 않았다면 이 스텝은 건너뛰고 익명으로 pull 한다.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: docker build --file deploy/Dockerfile --tag "${ECR_REPOSITORY}:${IMAGE_TAG}" .
+
+      - name: Export Docker image
+        run: docker save "${ECR_REPOSITORY}:${IMAGE_TAG}" --output site-image.tar
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = `#### Docker Deployment Preview \`Success\`
+
+            Docker 이미지 빌드가 성공적으로 완료되었습니다.
+            \`main\` 브랜치 머지 시 ECR과 SSM을 통해 ASG 컨테이너로 자동 배포됩니다.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-image
+          path: site-image.tar
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # 2) main 에 push 됐을 때만 ECR 에 올리고 ASG 전체에 배포한다.
+  # --------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Auto Scaling Group with SSM
+    needs: build-and-preview
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE_URI: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+    steps:
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: site-image
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        run: |
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      - name: Tag and push Docker image to ECR
+        run: |
+          docker load --input site-image.tar
+          docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+
+      - name: Deploy container through SSM
+        run: |
+          set -euo pipefail
+
+          # 인스턴스에서 실행할 스크립트.
+          # 한 줄짜리 JSON 으로 욱여넣지 않고 그대로 읽히도록 파일로 만든다.
+          # 러너의 셸이 ${...} 를 먼저 치환한 뒤 EC2 로 전달된다.
+          cat > remote-deploy.sh <<EOF
+          set -e
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker pull ${IMAGE_URI}
+          docker rm --force ${CONTAINER_NAME} || true
+          docker run --detach --name ${CONTAINER_NAME} --restart unless-stopped --publish ${HOST_PORT}:80 ${IMAGE_URI}
+          docker image prune --all --force
+          EOF
+
+          echo "----- EC2 에서 실행될 스크립트 -----"
+          cat remote-deploy.sh
+          echo "-----------------------------------"
+
+          # jq -Rs 로 스크립트 전체를 JSON 문자열 하나로 감싼다.
+          command_id=$(aws ssm send-command \
+            --targets "Key=${SSM_TARGET_KEY},Values=${SSM_TARGET_VALUE}" \
+            --document-name "AWS-RunShellScript" \
+            --comment "Deploy Docker image ${GITHUB_REPOSITORY}@${GITHUB_SHA}" \
+            --parameters "$(jq -Rs '{commands: [.]}' < remote-deploy.sh)" \
+            --query "Command.CommandId" \
+            --output text)
+
+          echo "SSM Command ID: ${command_id}"
+
+          # 대상이 여러 대라 인스턴스 단위 waiter 를 쓸 수 없다.
+          # 모든 invocation 이 끝날 때까지 최대 5분(10초 x 30회) 폴링한다.
+          statuses=""
+          for attempt in $(seq 1 30); do
+            statuses=$(aws ssm list-command-invocations \
+              --command-id "${command_id}" \
+              --details \
+              --query 'CommandInvocations[].Status' \
+              --output text)
+
+            case "${statuses}" in
+              "" | *Pending* | *InProgress* | *Delayed*)
+                sleep 10
+                ;;
+              *)
+                break
+                ;;
+            esac
+          done
+
+          echo "----- 인스턴스별 실행 결과 -----"
+          aws ssm list-command-invocations \
+            --command-id "${command_id}" \
+            --details \
+            --query 'CommandInvocations[].{Instance:InstanceId,Status:Status,Output:CommandPlugins[0].Output}' \
+            --output json
+
+          # 한 대라도 실패했거나 끝까지 진행 중이면 배포 실패로 처리한다.
+          case "${statuses}" in
+            "" | *Failed* | *Cancelled* | *TimedOut* | *Undeliverable* | *Pending* | *InProgress* | *Delayed*)
+              echo "배포 실패: ${statuses}"
+              exit 1
+              ;;
+          esac
+
+          echo "배포 성공: ${statuses}"
