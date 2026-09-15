@@ -9,6 +9,7 @@ module "mumbai_network" {
   tag_header         = local.tag_header
   create_nat_gateway = var.create_nat_gateway
   ssh_key            = var.ssh_key
+  ssh_allowed_cidrs  = var.ssh_allowed_cidrs
   vpc_options        = local.vpc_options
   ami_id             = local.ami_id
   region             = local.region
