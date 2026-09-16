@@ -19,7 +19,7 @@
 ```
 nginx/html/                네 방식이 공유하는 정적 사이트
 docker/
-  Dockerfile               nginx 이미지 (Amazon Linux 2023 기반)
+  Dockerfile               정적 사이트 이미지 (공식 nginx alpine 기반)
   docker-asg/
     docker-compose.yaml    볼륨·네트워크 구성
     user-data.sh           ASG 인스턴스 부팅 스크립트

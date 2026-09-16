@@ -1,23 +1,16 @@
-FROM amazonlinux:2023
+FROM nginx:1.31.3-alpine
 
-# nginx 는 AL2023 기본 저장소에 있다. 캐시를 남기면 레이어만 커지므로 같은 RUN 에서 정리한다.
-RUN dnf install -y nginx \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
+# 공식 nginx 이미지는 nginx 설치, 로그를 stdout/stderr 로 넘기는 심볼릭 링크,
+# 그리고 daemon off 로 띄우는 CMD 까지 이미 갖고 있다.
+# 그래서 여기서는 웹루트만 우리 것으로 바꾼다.
+#
+# 예전 amazonlinux 베이스에서는 그 셋을 직접 해야 했다. 베이스를 바꾸면
+# 그때 쓰던 dnf 명령은 알파인에 없어서 빌드가 그 줄에서 멈춘다.
 
-# 패키지로 설치한 nginx 는 로그를 파일로 남긴다.
-# 컨테이너 로그(docker logs)로 보이도록 표준출력/표준에러로 연결한다.
-RUN ln -sf /dev/stdout /var/log/nginx/access.log \
-    && ln -sf /dev/stderr /var/log/nginx/error.log
-
-# RPM 이 웹루트에 깔아두는 기본 파일(404.html, icons/, poweredby.png 심볼릭 링크 등)을
-# 치우고 우리 파일만 남긴다. 볼륨으로 꺼낼 때 심볼릭 링크가 걸림돌이 되기도 한다.
+# 기본 이미지의 index.html, 50x.html 을 먼저 치운다.
+# COPY 는 같은 이름만 덮어쓰므로, 지우지 않으면 50x.html 이 그대로 남는다.
 RUN rm -rf /usr/share/nginx/html/*
 
 COPY ./nginx/html /usr/share/nginx/html/
 
 EXPOSE 80
-
-# 공식 nginx 이미지와 달리 CMD 가 없으므로 직접 지정한다.
-# 데몬으로 띄우면 PID 1 이 즉시 종료되어 컨테이너가 죽는다.
-CMD ["nginx", "-g", "daemon off;"]
