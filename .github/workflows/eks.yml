@@ -2,11 +2,10 @@
 #
 #   1. 이미지 빌드 및 ECR 푸시
 #   2. 쿠버네티스 파일의 이미지 태그를 현재 커밋 SHA 로 갱신하고 git push
-#   3. 클러스터에 반영
 #
-# ArgoCD 를 붙이면 3번을 지운다. 2번까지가 CI, 반영은 ArgoCD 가 맡는다.
+# 여기까지가 CI 다. 클러스터 반영은 ArgoCD 가 git 을 보고 한다.
 
-name: Deploy Static Website to EKS
+name: Build and bump the image tag
 
 on:
   push:
@@ -74,10 +73,4 @@ jobs:
           git commit -am "chore: bump image to ${TAG} [skip ci]"
           git push
 
-      # 3. 클러스터에 반영 (ArgoCD 를 붙이면 이 스텝을 지운다)
-      - name: Deploy
-        run: |
-          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER}"
-
-          kubectl apply -k docker/k8s
-          kubectl -n static-site rollout status deployment/static-site --timeout=180s
+      # 클러스터 반영은 ArgoCD 가 한다. 여기서 kubectl 로 또 밀면 서로 덮는다.
