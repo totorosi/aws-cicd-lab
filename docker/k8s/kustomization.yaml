@@ -10,4 +10,4 @@ resources:
 images:
   - name: __IMAGE__
     newName: 925047940866.dkr.ecr.sa-east-1.amazonaws.com/nginx
-    newTag: 26988319dbf7dd508f789555284640d42c2de801
+    newTag: cd1ee8818dab19da02340939f7f3be08700d28e1
