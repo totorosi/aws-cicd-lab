@@ -36,7 +36,9 @@ permissions:
 jobs:
   deploy:
     name: Deploy to EKS
-    if: vars.DEPLOY_ENABLED == 'true'
+    # DEPLOY_ENABLED 는 정적 사이트 워크플로 4개와 공용이라 여기서는 쓰지 않는다.
+    # 클러스터 이름이 있으면 EKS 실습 중이라는 뜻이다.
+    if: vars.EKS_CLUSTER_NAME != ''
     runs-on: ubuntu-latest
 
     steps:
