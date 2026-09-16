@@ -1,11 +1,11 @@
-# ArgoCD 진입점. static-site.yaml 을 가져와 이미지만 덮어쓴다.
+# ArgoCD 진입점. web.yaml 을 가져와 이미지만 덮어쓴다.
 # ArgoCD 를 붙이기 전까지는 쓰이지 않는다. 그때 워크플로가 newName / newTag 를 갱신한다.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 resources:
   # deployment-nginx.yaml 은 연습용이라 넣지 않는다.
-  - static-site.yaml
+  - web.yaml
 
 images:
   - name: __IMAGE__

@@ -3,22 +3,22 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: static-site
+  name: web
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: static-site
-  namespace: static-site
+  name: web
+  namespace: web
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: static-site
+      app: web
   template:
     metadata:
       labels:
-        app: static-site
+        app: web
     spec:
       containers:
         - name: nginx
@@ -41,13 +41,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: static-site
-  namespace: static-site
+  name: web
+  namespace: web
 spec:
   # LoadBalancer 로 바꾸면 ELB 가 terraform 밖에 생겨 destroy 를 막는다.
   type: ClusterIP
   selector:
-    app: static-site
+    app: web
   ports:
     - name: http
       port: 80
