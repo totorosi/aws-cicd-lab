@@ -1,0 +1,35 @@
+# ArgoCD 가 이 저장소를 보고 클러스터를 맞추게 하는 Application.
+# ArgoCD 설치 후 한 번만 적용한다.
+#
+#   kubectl apply -f eks/workflows.yaml
+#   kubectl -n argocd get application static-site
+#
+# 아직 쓰지 않는다. 지금은 eks.yml 이 직접 kubectl apply 한다.
+# ArgoCD 를 올릴 때 eks.yml 의 deploy job 을 끄고 이걸 적용한다.
+# 같은 리소스를 둘이 관리하면 서로 덮는다.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: static-site
+  # ArgoCD 가 설치된 네임스페이스여야 한다. Application 을 다른 곳에 두면 무시된다.
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/totorosi/aws-cicd-lab.git
+    targetRevision: main
+    # 이 경로에 kustomization.yaml 이 있어서 ArgoCD 가 kustomize 로 렌더링한다.
+    path: docker/k8s
+
+  destination:
+    # ArgoCD 가 자기가 돌고 있는 클러스터를 가리키는 고정 주소다.
+    server: https://kubernetes.default.svc
+    namespace: static-site
+
+  syncPolicy:
+    automated:
+      # git 에서 지운 리소스를 클러스터에서도 지운다.
+      prune: true
+      # 누가 클러스터를 손으로 고치면 git 상태로 되돌린다.
+      selfHeal: true
