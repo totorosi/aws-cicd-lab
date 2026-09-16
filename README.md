@@ -1,6 +1,6 @@
 # aws-cicd-lab
 
-같은 정적 사이트를 **네 가지 방식으로 배포**하면서 차이를 비교한 실습 저장소입니다.
+같은 정적 사이트를 **다섯 가지 방식으로 배포**하면서 차이를 비교한 실습 저장소입니다.
 인프라는 Terraform 으로, 배포는 GitHub Actions 로 정의했습니다.
 
 아래로 갈수록 서버를 직접 만지는 정도가 줄고, 대신 거쳐야 할 단계가 늘어납니다.
@@ -11,25 +11,29 @@
 | **SSM** | [ssm.yml](.github/workflows/ssm.yml) | 러너 → S3 → SSM → EC2 웹루트 복사 | SSH 키 없이 원격 배포 |
 | **Docker** | [docker.yml](.github/workflows/docker.yml) | 러너 → 이미지 tar → S3 → EC2 `docker load` | 레지스트리 없이 이미지 전달 |
 | **Docker + ASG** | [docker-asg.yml](.github/workflows/docker-asg.yml) | 러너 → ECR → SSM → ASG 전체 | 인스턴스가 교체돼도 동작 |
+| **EKS** | [eks.yml](.github/workflows/eks.yml) | 러너 → ECR → `kubectl apply` → 파드 | 배치할 서버를 지정하지 않음 |
 
 별도로 [fastapi/](fastapi/) 에 **컨테이너가 죽어도 데이터가 남는** FastAPI + Postgres 구성이 있습니다.
 
 ## 구조
 
 ```
-nginx/html/                네 방식이 공유하는 정적 사이트
+nginx/html/                다섯 방식이 공유하는 정적 사이트
 docker/
   Dockerfile               정적 사이트 이미지 (공식 nginx alpine 기반)
   docker-asg/
     docker-compose.yaml    볼륨·네트워크 구성
     user-data.sh           ASG 인스턴스 부팅 스크립트
+  k8s/
+    static-site.yaml       EKS 에 올리는 Deployment · Service
 fastapi/                   FastAPI + Postgres (영속성 데모)
 terraform/
   modules/network          VPC · 서브넷 · NAT · 보안그룹 · EC2 · IAM
   modules/database         RDS (기본 비활성화)
   modules/eks              EKS 클러스터 · 노드 그룹 · 애드온 (기본 비활성화)
   projects/                실제 구성 진입점
-.github/workflows/         위 표의 워크플로 5개
+.github/workflows/         위 표의 배포 워크플로 5개 + terraform · fastapi 검사
+.github/scripts/           워크플로가 부르는 검사 스크립트
 ```
 
 ## 준비
@@ -46,6 +50,17 @@ terraform/
 | `TF_STATE_BUCKET` | Terraform state 버킷 |
 | `TF_VAR_SSH_ALLOWED_CIDRS` | SSH 허용 대역 (JSON 배열) |
 | `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` | 선택. 베이스 이미지 pull 횟수 제한 회피 |
+
+### 저장소 변수
+
+시크릿이 아니라 Variables 에 넣습니다 (Settings → Secrets and variables → Actions → Variables).
+값이 없으면 배포 job 은 실패가 아니라 건너뜀으로 처리되므로, 시크릿을 설정하지 않은
+저장소에서도 워크플로가 그대로 돕니다.
+
+| 이름 | 용도 |
+|---|---|
+| `DEPLOY_ENABLED` | `true` 일 때만 실제 배포·apply 가 실행됨 |
+| `EKS_CLUSTER_NAME` | EKS 배포 대상 클러스터. `terraform output eks_cluster_name` 값 |
 
 ### Terraform
 

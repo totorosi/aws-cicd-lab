@@ -1,0 +1,293 @@
+# 정적 사이트를 EKS 클러스터에 배포한다.
+#
+#   [러너] docker build → docker save → tar
+#        → ECR push
+#        → kubectl apply (Namespace · Deployment · Service)
+#   [EKS] 노드가 ECR 에서 이미지를 받아 파드 2개로 띄운다
+#
+# 앞의 네 방식과 결이 다르다. 그쪽은 "어느 서버의 어느 경로에 무엇을 둘지" 를
+# 워크플로가 직접 정했지만, 여기서는 원하는 상태만 선언하고 배치는 클러스터가 정한다.
+# 그래서 배포 성공 여부도 명령이 끝났는지가 아니라 롤아웃이 끝났는지로 판정한다.
+#
+# Service 는 ClusterIP 다. 외부 주소가 생기지 않으므로 확인은 워크플로 안에서 한다.
+# LoadBalancer 로 바꾸면 쿠버네티스가 ELB 를 만드는데, 그건 terraform state 밖이라
+# 지우지 않고 terraform destroy 를 하면 VPC 삭제가 멈춘다.
+
+name: Deploy Static Website to EKS
+
+# ----------------------------------------------------------------------------
+# 트리거
+# ----------------------------------------------------------------------------
+on:
+  pull_request:
+    paths:
+      - "nginx/**"
+      - "docker/Dockerfile"
+      - "docker/k8s/**"
+      - ".github/workflows/eks.yml"
+  push:
+    branches: [main]
+    paths:
+      - "nginx/**"
+      - "docker/Dockerfile"
+      - "docker/k8s/**"
+      - ".github/workflows/eks.yml"
+  workflow_dispatch:
+
+# ----------------------------------------------------------------------------
+# 공통 설정
+# ----------------------------------------------------------------------------
+env:
+  AWS_REGION: sa-east-1
+
+  # 이미지 저장소. 계정 ID 는 저장소에 두지 않고 시크릿으로 받는다.
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.sa-east-1.amazonaws.com
+  ECR_REPOSITORY: nginx
+
+  # 태그로 커밋 SHA 를 쓴다. latest 를 재사용하면 매니페스트 내용이 그대로라
+  # kubectl apply 가 "변경 없음" 으로 끝나고 파드가 새 이미지를 받지 않는다.
+  IMAGE_TAG: ${{ github.sha }}
+
+  # 클러스터 이름은 환경마다 다르므로 저장소 변수로 받는다.
+  # Settings → Secrets and variables → Actions → Variables 에 EKS_CLUSTER_NAME 추가.
+  EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
+
+  K8S_NAMESPACE: static-site
+  K8S_APP: static-site
+  MANIFEST: docker/k8s/static-site.yaml
+
+# 동시에 여러 배포가 돌면 롤아웃이 겹친다
+concurrency:
+  group: eks-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1) 이미지를 빌드하고 매니페스트를 검사한다. PR 에서는 여기까지만 돈다.
+  #    자격증명이 필요 없어 시크릿을 설정하지 않은 저장소에서도 그대로 돈다.
+  # --------------------------------------------------------------------------
+  build-and-preview:
+    name: Build image & check manifests
+    runs-on: ubuntu-latest
+
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # 베이스 이미지의 익명 pull 횟수 제한을 피하기 위한 로그인.
+      # 시크릿이 없으면 건너뛰고 익명으로 받는다.
+      - name: Log in to Docker Hub
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      # 클러스터에 붙지 않고 할 수 있는 검사만 한다.
+      # YAML 문법과 필수 리소스가 있는지 보는 수준이고, 스키마 검증은 아니다.
+      - name: Check manifests
+        run: |
+          # 러너에 PyYAML 이 있다는 보장이 없으므로 없을 때만 설치한다.
+          python3 -c "import yaml" 2>/dev/null || pip install --quiet pyyaml
+          python3 .github/scripts/check-k8s-manifest.py "${MANIFEST}"
+
+      - name: Build Docker image
+        run: docker build --file docker/Dockerfile --tag "${ECR_REPOSITORY}:${IMAGE_TAG}" .
+
+      - name: Export Docker image
+        run: docker save "${ECR_REPOSITORY}:${IMAGE_TAG}" --output site-image.tar
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const body = `#### EKS Deployment Preview \`Success\`
+
+            이미지 빌드와 매니페스트 검사가 통과했습니다.
+            \`main\` 브랜치에 머지되면 ECR 에 올라가고 EKS 클러스터에 롤아웃됩니다.`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: eks-site-image
+          path: site-image.tar
+          retention-days: 5
+
+  # --------------------------------------------------------------------------
+  # 2) main 에 push 됐을 때만 ECR 에 올리고 클러스터에 반영한다.
+  # --------------------------------------------------------------------------
+  deploy:
+    name: Roll out to EKS
+    needs: build-and-preview
+    # 배포는 저장소 변수 DEPLOY_ENABLED 가 'true' 일 때만 돈다.
+    # 값이 없으면 실패가 아니라 '건너뜀' 으로 처리된다.
+    # (secrets 는 job 레벨 if 에서 쓸 수 없어 vars 로 게이트한다)
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: eks-site-image
+
+      # 클러스터 이름이 없으면 update-kubeconfig 가 알아보기 어려운 에러를 낸다.
+      # 무엇을 설정해야 하는지 여기서 먼저 알려준다.
+      - name: Check required settings
+        run: |
+          if [ -z "${EKS_CLUSTER_NAME}" ]; then
+            echo "저장소 변수 EKS_CLUSTER_NAME 이 비어 있습니다."
+            echo "Settings → Secrets and variables → Actions → Variables 에 클러스터 이름을 추가하세요."
+            echo "값은 아래 명령으로 확인할 수 있습니다:"
+            echo "  terraform -chdir=terraform/projects output eks_cluster_name"
+            exit 1
+          fi
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        run: |
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      - name: Push image to ECR
+        run: |
+          set -euo pipefail
+
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          docker load --input site-image.tar
+          docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${IMAGE_URI}"
+          docker push "${IMAGE_URI}"
+
+      - name: Connect kubectl to the cluster
+        run: |
+          set -euo pipefail
+
+          aws eks update-kubeconfig \
+            --region "${AWS_REGION}" \
+            --name "${EKS_CLUSTER_NAME}"
+
+          # 자격증명이 클러스터 권한까지 갖고 있는지 여기서 확인한다.
+          # 클러스터를 만든 주체와 다른 IAM 사용자면 kubectl 이 거부당하는데,
+          # 그때는 terraform 의 admin_principal_arns 에 그 ARN 을 넣고 apply 한다.
+          if ! kubectl get nodes; then
+            echo "클러스터에 접근하지 못했습니다."
+            echo "이 워크플로가 쓰는 IAM 주체:"
+            aws sts get-caller-identity --query Arn --output text
+            echo "이 ARN 을 terraform 의 admin_principal_arns 에 추가한 뒤 apply 하세요."
+            exit 1
+          fi
+
+      - name: Apply manifests
+        run: |
+          set -euo pipefail
+
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          # 자리표시자를 이번 커밋의 이미지로 바꾼다. 원본 파일은 건드리지 않는다.
+          sed "s|__IMAGE__|${IMAGE_URI}|" "${MANIFEST}" > /tmp/manifest.yaml
+
+          echo "----- 적용할 이미지 -----"
+          grep -n "image:" /tmp/manifest.yaml
+          echo "-------------------------"
+
+          kubectl apply -f /tmp/manifest.yaml
+
+      - name: Wait for the rollout
+        run: |
+          set -euo pipefail
+
+          # 배포 성공 판정은 여기서 한다. 새 파드가 readiness 를 통과하고
+          # 예전 파드가 물러날 때까지 기다린다. 실패하면 여기서 멈춘다.
+          kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${K8S_APP}" --timeout=180s
+
+      - name: Verify the service serves the site
+        run: |
+          set -euo pipefail
+
+          # Service 에 엔드포인트가 붙었는지 먼저 본다.
+          # 파드가 떠 있어도 readiness 를 통과 못했으면 여기가 비어 있다.
+          addrs=$(kubectl -n "${K8S_NAMESPACE}" get endpointslice \
+            -l "kubernetes.io/service-name=${K8S_APP}" \
+            -o jsonpath='{range .items[*]}{range .endpoints[*]}{.addresses[0]}{" "}{end}{end}')
+
+          if [ -z "${addrs}" ]; then
+            echo "Service 에 붙은 엔드포인트가 없습니다."
+            kubectl -n "${K8S_NAMESPACE}" describe service "${K8S_APP}"
+            exit 1
+          fi
+          echo "엔드포인트: ${addrs}"
+
+          # ClusterIP 라 밖에서 직접 부를 수 없다. 포트포워딩으로 열어 실제 응답을 본다.
+          kubectl -n "${K8S_NAMESPACE}" port-forward "service/${K8S_APP}" 18080:80 \
+            > /tmp/port-forward.log 2>&1 &
+          pf_pid=$!
+          trap 'kill "${pf_pid}" 2>/dev/null || true' EXIT
+
+          ok=""
+          for attempt in $(seq 1 20); do
+            if curl -fsS --max-time 3 http://127.0.0.1:18080/ -o /tmp/body.html; then
+              ok="yes"
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "${ok}" ]; then
+            echo "포트포워딩으로 응답을 받지 못했습니다."
+            cat /tmp/port-forward.log
+            exit 1
+          fi
+
+          # 200 만으로는 부족하다. nginx 기본 페이지가 아니라
+          # 우리가 올린 사이트가 맞는지 내용으로 확인한다.
+          if ! grep -q "MSP 6기" /tmp/body.html; then
+            echo "응답은 받았지만 우리 사이트가 아닙니다. 앞부분:"
+            head -20 /tmp/body.html
+            exit 1
+          fi
+
+          echo "배포한 사이트가 정상 응답합니다."
+
+      - name: Show what is running
+        if: always()
+        run: |
+          kubectl -n "${K8S_NAMESPACE}" get deployment,pod,service -o wide || true
+          echo "----- 파드가 어느 노드에 올라갔는지 -----"
+          kubectl -n "${K8S_NAMESPACE}" get pods \
+            -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName,STATUS:.status.phase' || true
+
+      - name: Show logs on failure
+        if: failure()
+        run: |
+          kubectl -n "${K8S_NAMESPACE}" describe deployment "${K8S_APP}" || true
+          kubectl -n "${K8S_NAMESPACE}" logs "deployment/${K8S_APP}" --tail=80 --all-containers || true
+          kubectl -n "${K8S_NAMESPACE}" get events --sort-by=.lastTimestamp | tail -30 || true
