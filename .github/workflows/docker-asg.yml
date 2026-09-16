@@ -15,14 +15,16 @@ name: Deploy Static Website with Docker ASG
 on:
   pull_request:
     paths:
-      - "site/**"
-      - "deploy/**"
+      - "nginx/**"
+      - "docker/Dockerfile"
+      - "docker/docker-asg/**"
       - ".github/workflows/docker-asg.yml"
   push:
     branches: [main]
     paths:
-      - "site/**"
-      - "deploy/**"
+      - "nginx/**"
+      - "docker/Dockerfile"
+      - "docker/docker-asg/**"
       - ".github/workflows/docker-asg.yml"
   workflow_dispatch:
 
@@ -81,7 +83,7 @@ jobs:
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        run: docker build --file deploy/Dockerfile --tag "${ECR_REPOSITORY}:${IMAGE_TAG}" .
+        run: docker build --file docker/Dockerfile --tag "${ECR_REPOSITORY}:${IMAGE_TAG}" .
 
       - name: Export Docker image
         run: docker save "${ECR_REPOSITORY}:${IMAGE_TAG}" --output site-image.tar

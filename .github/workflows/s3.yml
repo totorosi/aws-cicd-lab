@@ -1,6 +1,6 @@
 # 정적 사이트를 S3 버킷에 동기화해서 배포한다.
 #
-#   [러너] site/ → aws s3 sync --delete
+#   [러너] nginx/html/ → aws s3 sync --delete
 #   [AWS] S3 가 직접 서빙 (정적 웹사이트 호스팅 또는 CloudFront 오리진)
 #
 # 서버도 컨테이너도 없는 가장 단순한 방식이다.
@@ -14,12 +14,12 @@ name: Deploy Static Website to S3
 on:
   pull_request:
     paths:
-      - "site/**"
+      - "nginx/**"
       - ".github/workflows/s3.yml"
   push:
     branches: [main]
     paths:
-      - "site/**"
+      - "nginx/**"
       - ".github/workflows/s3.yml"
   workflow_dispatch:
 
@@ -31,7 +31,7 @@ env:
   S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
 
   # 버킷에 올릴 디렉토리
-  BUILD_DIR: site
+  BUILD_DIR: nginx/html
 
 # 동시에 여러 배포가 실행되어 S3 파일이 꼬이는 것을 방지
 concurrency:
@@ -104,7 +104,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # --delete 로 버킷을 site/ 와 정확히 일치시킨다.
+      # --delete 로 버킷을 nginx/html/ 과 정확히 일치시킨다.
       # 저장소에서 지운 파일이 버킷에 남지 않는다.
       - name: Sync files to S3
         run: |

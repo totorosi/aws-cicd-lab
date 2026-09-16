@@ -14,7 +14,7 @@ RUN ln -sf /dev/stdout /var/log/nginx/access.log \
 # 치우고 우리 파일만 남긴다. 볼륨으로 꺼낼 때 심볼릭 링크가 걸림돌이 되기도 한다.
 RUN rm -rf /usr/share/nginx/html/*
 
-COPY site/ /usr/share/nginx/html/
+COPY ./nginx/html /usr/share/nginx/html/
 
 EXPOSE 80
 

@@ -15,12 +15,12 @@ name: Deploy Static Website with SSM
 on:
   pull_request:
     paths:
-      - "site/**"
+      - "nginx/**"
       - ".github/workflows/ssm.yml"
   push:
     branches: [main]
     paths:
-      - "site/**"
+      - "nginx/**"
       - ".github/workflows/ssm.yml"
   workflow_dispatch:
 
@@ -40,7 +40,7 @@ env:
   WEB_ROOT: /usr/share/nginx/html
 
   # 리포지토리 안에서 배포할 디렉터리
-  BUILD_DIR: site
+  BUILD_DIR: nginx/html
 
 # 동시에 여러 배포가 실행되어 서버 파일이 꼬이는 것을 방지
 concurrency:

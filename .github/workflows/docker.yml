@@ -15,14 +15,14 @@ name: Deploy Static Website with Docker
 on:
   pull_request:
     paths:
-      - "site/**"
-      - "deploy/Dockerfile"
+      - "nginx/**"
+      - "docker/Dockerfile"
       - ".github/workflows/docker.yml"
   push:
     branches: [main]
     paths:
-      - "site/**"
-      - "deploy/Dockerfile"
+      - "nginx/**"
+      - "docker/Dockerfile"
       - ".github/workflows/docker.yml"
   workflow_dispatch:
 
@@ -80,7 +80,7 @@ jobs:
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Build Docker image
-        run: docker build --file deploy/Dockerfile --tag "${IMAGE_NAME}:${GITHUB_SHA}" .
+        run: docker build --file docker/Dockerfile --tag "${IMAGE_NAME}:${GITHUB_SHA}" .
 
       - name: Export Docker image
         run: docker save "${IMAGE_NAME}:${GITHUB_SHA}" --output site-image.tar

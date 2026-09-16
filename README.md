@@ -17,8 +17,8 @@
 ## 구조
 
 ```
-site/                      네 방식이 공유하는 정적 사이트
-deploy/
+nginx/html/                네 방식이 공유하는 정적 사이트
+docker/
   Dockerfile               nginx 이미지 (Amazon Linux 2023 기반)
   docker-asg/
     docker-compose.yaml    볼륨·네트워크 구성
@@ -66,7 +66,7 @@ terraform plan
 **바인드 마운트는 이미지 내용을 호스트로 복사하지 않습니다.**
 빈 디렉토리를 컨테이너 웹루트에 마운트하면 이미지에 있던 파일이 *가려져서* nginx 가 403 을 냅니다.
 그래서 배포할 때 이미지에서 파일을 꺼내 호스트에 채우는 단계를 넣었습니다
-([user-data.sh](deploy/docker-asg/user-data.sh)).
+([user-data.sh](docker/docker-asg/user-data.sh)).
 
 **ASG 에서 user_data 가 비어 있으면 상태 확인이 무한 교체를 부릅니다.**
 user_data 는 부팅 시 한 번만 실행되고, SSM 배포는 이미 떠 있는 인스턴스에만 닿습니다.
