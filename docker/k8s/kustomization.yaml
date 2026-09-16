@@ -9,5 +9,5 @@ resources:
 
 images:
   - name: __IMAGE__
-    newName: ACCOUNT_ID.dkr.ecr.sa-east-1.amazonaws.com/nginx
-    newTag: latest
+    newName: 925047940866.dkr.ecr.sa-east-1.amazonaws.com/nginx
+    newTag: 66c9940960de4050c0d31be41654aa6dc7fcede7
