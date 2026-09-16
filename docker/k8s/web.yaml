@@ -12,6 +12,15 @@ metadata:
   namespace: web
 spec:
   replicas: 2
+
+  # 새 파드가 뜬 뒤에 옛 파드를 내린다. maxUnavailable: 0 이라 배포 중에도
+  # 받을 수 있는 파드 수가 줄지 않는다.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
   selector:
     matchLabels:
       app: web
@@ -26,10 +35,21 @@ spec:
           ports:
             - name: http
               containerPort: 80
+          # readiness: 트래픽을 받을 준비가 됐는가. 실패하면 Service 에서 뺀다.
           readinessProbe:
             httpGet:
               path: /
               port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          # liveness: 살아있는가. 실패하면 컨테이너를 재시작한다.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
           resources:
             requests:
               cpu: 50m
