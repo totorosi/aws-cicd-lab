@@ -1,4 +1,4 @@
-# 정적 사이트. __IMAGE__ 는 배포할 때 치환한다.
+# EKS 에 올리는 웹 앱. __IMAGE__ 는 kustomization.yaml 이 ECR 주소로 바꾼다.
 ---
 apiVersion: v1
 kind: Namespace
@@ -8,12 +8,13 @@ metadata:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: web
+  name: nginx-deployment
   namespace: web
 spec:
-  replicas: 2
+  # replicas 를 적지 않는다. HPA 가 파드 수를 정하는데 여기에 숫자가 있으면
+  # ArgoCD 가 selfHeal 로 그 숫자를 되돌려 HPA 와 싸운다.
 
-  # 새 파드가 뜬 뒤에 옛 파드를 내린다. maxUnavailable: 0 이라 배포 중에도
+  # 새 파드가 뜬 뒤 옛 파드를 내린다. maxUnavailable: 0 이라 배포 중에도
   # 받을 수 있는 파드 수가 줄지 않는다.
   strategy:
     type: RollingUpdate
@@ -23,23 +24,36 @@ spec:
 
   selector:
     matchLabels:
-      app: web
+      app: nginx-web
+
   template:
     metadata:
       labels:
-        app: web
+        app: nginx-web
     spec:
       containers:
-        - name: nginx
+        - name: nginx-container
           image: __IMAGE__
           ports:
-            - name: http
-              containerPort: 80
+            - containerPort: 80
+
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+          env:
+            - name: NGINX_PORT
+              value: "80"
+
           # readiness: 트래픽을 받을 준비가 됐는가. 실패하면 Service 에서 뺀다.
           readinessProbe:
             httpGet:
-              path: /
-              port: http
+              path: / # nginx 는 별도 헬스 경로가 없어 루트를 쓴다
+              port: 80
             initialDelaySeconds: 5
             periodSeconds: 5
 
@@ -47,53 +61,104 @@ spec:
           livenessProbe:
             httpGet:
               path: /
-              port: http
+              port: 80
             initialDelaySeconds: 15
             periodSeconds: 10
-          resources:
-            requests:
-              cpu: 50m
-              memory: 64Mi
-            limits:
-              cpu: 200m
-              memory: 128Mi
+---
+# HPA. metrics-server 가 없으면 타겟이 <unknown> 으로 남아 동작하지 않는다.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa
+  namespace: web
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: nginx-deployment
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: web
+  name: nginx-service
   namespace: web
 spec:
-  # Ingress 가 ALB 를 만들므로 Service 는 ClusterIP 로 둔다.
-  # LoadBalancer 로 바꾸면 ALB 와 별개로 ELB 가 하나 더 생긴다.
+  # 외부 접속은 ALB 가 받는다. Service 를 직접 열지 않는다.
   type: ClusterIP
   selector:
-    app: web
+    app: nginx-web
   ports:
-    - name: http
+    - protocol: TCP
       port: 80
-      targetPort: http
+      targetPort: 80
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: web
+  name: alb-base-ingress
   namespace: web
   annotations:
-    # 인터넷에서 닿는 ALB 를 만든다. internal 로 두면 VPC 안에서만 닿는다.
+    # 보안 그룹을 지정하지 않으면 컨트롤러가 알아서 만든다.
+    # 지정하려면: alb.ingress.kubernetes.io/security-groups: sg-...
+
+    # internet-facing: 인터넷에서 닿는다. internal: VPC 안에서만.
     alb.ingress.kubernetes.io/scheme: internet-facing
-    # 파드 IP 로 직접 보낸다. instance 로 두면 NodePort 를 거친다.
+
+    # ip: 파드 IP 로 직접 보낸다. instance: NodePort 를 거친다.
     alb.ingress.kubernetes.io/target-type: ip
+
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+
+    # 이 계정 sa-east-1 의 totorosi.cloud 인증서.
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:sa-east-1:925047940866:certificate/138f2afe-f4dc-4287-9022-16812a765806
+
+    # ssl-redirect 는 아직 켜지 않는다. ALB 기본 주소로 접속하면 인증서 도메인과
+    # 달라 경고가 뜨는데, 리다이렉트까지 걸면 http 접속이 전부 그 화면이 된다.
+    # Route53 에 totorosi.cloud 를 이 ALB 로 걸고 나서 켠다.
+    # alb.ingress.kubernetes.io/ssl-redirect: "443"
+
+    # /nginx 로 들어온 요청을 파드에는 / 로 전달한다. 이게 없으면 nginx 가
+    # /nginx 라는 파일을 찾다가 404 를 낸다.
+    alb.ingress.kubernetes.io/transforms.nginx-service: >
+      [
+        {
+          "type": "url-rewrite",
+          "urlRewriteConfig": {
+            "rewrites": [
+              {
+                "regex": "^\\/nginx(?:\\/(.*))?$",
+                "replace": "/$1"
+              }
+            ]
+          }
+        }
+      ]
 spec:
-  # AWS Load Balancer Controller 가 이 클래스를 보고 ALB 를 만든다.
   ingressClassName: alb
   rules:
     - http:
         paths:
-          - path: /
+          - path: /nginx
             pathType: Prefix
             backend:
               service:
-                name: web
+                name: nginx-service
                 port:
                   number: 80
+          # FastAPI 를 붙이면 같은 ALB 를 경로로 나눠 쓴다.
+          # - path: /api
+          #   pathType: Prefix
+          #   backend:
+          #     service:
+          #       name: fastapi-service
+          #       port:
+          #         number: 8000
